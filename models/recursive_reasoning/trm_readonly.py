@@ -197,61 +197,19 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         seq_info = dict(
             cos_sin=self.rotary_emb() if hasattr(self, "rotary_emb") else None,
         )
-        
+
         # Input encoding
         input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
 
         # Forward iterations
+        it = 0
         z_H, z_L = carry.z_H, carry.z_L
-        
-        # Hyperparameters
-        eps = 1e-6
-        tau = 1e-3 # residual threshold
-        patience_req = 2 # require residual < tau for this many consecutive cycles
-        max_no_grad_H = 20 # avoid infinite recursions
-        
         # H_cycles-1 without grad
         with torch.no_grad():
-            
-            patience = 0
-            h_iter = 0
-            
-            # recurse until fix point reached
-            while True:
-                
-                # exit immediately if reaching maximal iteration
-                if h_iter >= max_no_grad_H:
-                    break
-                
-                # save previous state (for residual)
-                z_H_prev = z_H
-                z_L_prev = z_L 
-                
-                # One full H-cycle (no grad)
+            for _H_step in range(self.config.H_cycles-1):
                 for _L_step in range(self.config.L_cycles):
                     z_L = self.L_level(z_L, z_H + input_embeddings, **seq_info)
                 z_H = self.L_level(z_H, z_L, **seq_info)
-                
-                # Residual magik (AI, we use it as black box)
-                dH = (z_H.float() - z_H_prev.float())
-                dL = (z_L.float() - z_L_prev.float())
-                rms_dH = torch.sqrt(torch.mean(dH * dH, dim=(1, 2)) + eps)
-                rms_H  = torch.sqrt(torch.mean(z_H_prev.float() * z_H_prev.float(), dim=(1, 2)) + eps)
-                r_H = rms_dH / (rms_H + eps)
-                rms_dL = torch.sqrt(torch.mean(dL * dL, dim=(1, 2)) + eps)
-                rms_L  = torch.sqrt(torch.mean(z_L_prev.float() * z_L_prev.float(), dim=(1, 2)) + eps)
-                r_L = rms_dL / (rms_L + eps)
-                r = torch.maximum(r_H, r_L)  # [B]
-
-                h_iter += 1
-                
-                if (r < tau).all():
-                    patience += 1
-
-                    # satisfy pausing condition
-                    if patience >= patience_req:
-                        break 
-                
         # 1 with grad
         for _L_step in range(self.config.L_cycles):
             z_L = self.L_level(z_L, z_H + input_embeddings, **seq_info)
