@@ -36,4 +36,16 @@ python -u pretrain.py \
     +run_name=trm_r_mlp-sudoku_extreme ema=True
 
 ### codex commmand
+
 codex --dangerously-bypass-approvals-and-sandbox
+
+### check allocation status
+sinfo -N -O "NodeList,CPUsState,Memory,FreeMem,Gres,GresUsed"   | awk 'NR==1{print; next} {print $1, $2, $3/1024, $4/1024, $5, $6}'
+
+### Evaluation
+python evaluate.py \
+  arch=trm \
+  data_paths="[data/sudoku-extreme-1k-aug-1000]" \
+  +load_checkpoint=checkpoints/Sudoku-extreme-1k-aug-1000-ACT-torch/trm_r_mlp-sudoku_extreme/step_65100 \
+  +project_name=Sudoku-extreme-1k-aug-1000-ACT-torch \
+  +run_name=eval_trm_mlp
