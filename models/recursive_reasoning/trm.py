@@ -11,7 +11,20 @@ from models.common import trunc_normal_init_
 from models.layers import rms_norm, LinearSwish, SwiGLU, Attention, RotaryEmbedding, CosSin, CastedEmbedding, CastedLinear
 from models.sparse_embedding import CastedSparseEmbedding
 
+
+import os
+import logging
+import tqdm
+import torch
+import torch.distributed as dist
+
+
 IGNORE_LABEL_ID = -100
+
+# small util for printing
+def log0(msg: str):
+    if (not dist.is_initialized()) or dist.get_rank() == 0:
+        tqdm.tqdm.write(msg)
 
 @dataclass
 class TinyRecursiveReasoningModel_ACTV1InnerCarry:
@@ -192,7 +205,7 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
             z_H=torch.where(reset_flag.view(-1, 1, 1), self.H_init, carry.z_H),
             z_L=torch.where(reset_flag.view(-1, 1, 1), self.L_init, carry.z_L),
         )
-
+    
     def forward(self, carry: TinyRecursiveReasoningModel_ACTV1InnerCarry, batch: Dict[str, torch.Tensor]) -> Tuple[TinyRecursiveReasoningModel_ACTV1InnerCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         seq_info = dict(
             cos_sin=self.rotary_emb() if hasattr(self, "rotary_emb") else None,
@@ -251,7 +264,13 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
                     # satisfy pausing condition
                     if patience >= patience_req:
                         break 
-                
+                    
+        # debug message
+        if patience >= patience_req:
+            log0("stop early")
+        # else:
+        #     log0("not stop early")
+                    
         # 1 with grad
         for _L_step in range(self.config.L_cycles):
             z_L = self.L_level(z_L, z_H + input_embeddings, **seq_info)

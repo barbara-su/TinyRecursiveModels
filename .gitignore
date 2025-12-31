@@ -1,1 +1,7 @@
 trm
+__pycache__
+data
+
+checkpoints
+wandb
+outputs
