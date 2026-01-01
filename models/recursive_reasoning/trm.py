@@ -193,33 +193,65 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
             z_L=torch.where(reset_flag.view(-1, 1, 1), self.L_init, carry.z_L),
         )
 
-    def forward(self, carry: TinyRecursiveReasoningModel_ACTV1InnerCarry, batch: Dict[str, torch.Tensor]) -> Tuple[TinyRecursiveReasoningModel_ACTV1InnerCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, carry: TinyRecursiveReasoningModel_ACTV1InnerCarry, batch: Dict[str, torch.Tensor]) -> Tuple[TinyRecursiveReasoningModel_ACTV1InnerCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
         seq_info = dict(
             cos_sin=self.rotary_emb() if hasattr(self, "rotary_emb") else None,
         )
-
+        
+        # avoid division by 0
+        eps = 1e-8
+        
         # Input encoding
         input_embeddings = self._input_embeddings(batch["inputs"], batch["puzzle_identifiers"])
 
         # Forward iterations
         it = 0
         z_H, z_L = carry.z_H, carry.z_L
+        
         # H_cycles-1 without grad
         with torch.no_grad():
             for _H_step in range(self.config.H_cycles-1):
                 for _L_step in range(self.config.L_cycles):
                     z_L = self.L_level(z_L, z_H + input_embeddings, **seq_info)
                 z_H = self.L_level(z_H, z_L, **seq_info)
-        # 1 with grad
-        for _L_step in range(self.config.L_cycles):
-            z_L = self.L_level(z_L, z_H + input_embeddings, **seq_info)
-        z_H = self.L_level(z_H, z_L, **seq_info)
+                
+        # save no-grad fixed-point candidate
+        z_H_fp = z_H
+        z_L_fp = z_L
 
-        # LM Outputs
-        new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(z_H=z_H.detach(), z_L=z_L.detach())  # New carry no grad
+        # detach the candidate so gradients flow only through the mapping F_theta
+        z_H0 = z_H_fp.detach()
+        z_L0 = z_L_fp.detach()
+
+        # one probe application of the update map WITH grad
+        z_L_probe = z_L0
+        for _L_step in range(self.config.L_cycles):
+            z_L_probe = self.L_level(z_L_probe, z_H0 + input_embeddings, **seq_info)
+        z_H_probe = self.L_level(z_H0, z_L_probe, **seq_info)
+
+        # differentiable fixed-point residual (fp32 for stability)
+        dH = (z_H_probe.float() - z_H0.float())
+        dL = (z_L_probe.float() - z_L0.float())
+
+        rms_dH = torch.sqrt(torch.mean(dH * dH, dim=(1, 2)) + eps)
+        rms_H  = torch.sqrt(torch.mean(z_H0.float() * z_H0.float(), dim=(1, 2)) + eps)
+        r_H = rms_dH / (rms_H + eps)
+
+        rms_dL = torch.sqrt(torch.mean(dL * dL, dim=(1, 2)) + eps)
+        rms_L  = torch.sqrt(torch.mean(z_L0.float() * z_L0.float(), dim=(1, 2)) + eps)
+        r_L = rms_dL / (rms_L + eps)
+
+        # keep both high level and low level residual for now
+        fp_residual_probe = torch.maximum(r_H, r_L)  # (B,)
+
+        # use the final state for logits 
+        output = self.lm_head(z_H_probe)[:, self.puzzle_emb_len:]
+
+        # basically same
+        new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(z_H=z_H_probe.detach(), z_L=z_L_probe.detach())  # New carry no grad
         output = self.lm_head(z_H)[:, self.puzzle_emb_len:]
         q_logits = self.q_head(z_H[:, 0]).to(torch.float32) # Q-head; uses the first puzzle_emb position
-        return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
+        return new_carry, output, (q_logits[..., 0], q_logits[..., 1]), fp_residual_probe
 
 
 class TinyRecursiveReasoningModel_ACTV1(nn.Module):
@@ -255,13 +287,14 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
 
         new_current_data = {k: torch.where(carry.halted.view((-1, ) + (1, ) * (batch[k].ndim - 1)), batch[k], v) for k, v in carry.current_data.items()}
 
-        # Forward inner model
-        new_inner_carry, logits, (q_halt_logits, q_continue_logits) = self.inner(new_inner_carry, new_current_data)
+        # Forward inner model (newly added, expose residual term)
+        new_inner_carry, logits, (q_halt_logits, q_continue_logits), fp_residual_probe = self.inner(new_inner_carry, new_current_data)
 
         outputs = {
             "logits": logits,
             "q_halt_logits": q_halt_logits,
-            "q_continue_logits": q_continue_logits
+            "q_continue_logits": q_continue_logits,
+            "fp_residual_probe": fp_residual_probe, # new term :)
         }
 
         with torch.no_grad():
@@ -291,7 +324,7 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
                     # NOTE: No replay buffer and target networks for computing target Q-value.
                     # As batch_size is large, there're many parallel envs.
                     # Similar concept as PQN https://arxiv.org/abs/2407.04811
-                    _, _, (next_q_halt_logits, next_q_continue_logits), _, _ = self.inner(new_inner_carry, new_current_data)
+                    _, _, (next_q_halt_logits, next_q_continue_logits), _ = self.inner(new_inner_carry, new_current_data)
                     outputs["target_q_continue"] = torch.sigmoid(torch.where(is_last_step, next_q_halt_logits, torch.maximum(next_q_halt_logits, next_q_continue_logits)))
 
         return TinyRecursiveReasoningModel_ACTV1Carry(new_inner_carry, new_steps, halted, new_current_data), outputs

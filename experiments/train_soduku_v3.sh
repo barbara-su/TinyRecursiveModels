@@ -1,8 +1,7 @@
 #!/bin/bash
 #SBATCH -A ak85
-#SBATCH --nodelist=bg5u16g1
 #SBATCH -p commons
-#SBATCH --gres=gpu:h200:2
+#SBATCH --gres=gpu:h100:2
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=200G
 #SBATCH --time=23:00:00
@@ -37,8 +36,6 @@ torchrun --nproc-per-node=2 pretrain.py \
   weight_decay=1.0 puzzle_emb_weight_decay=1.0 \
   arch.mlp_t=True arch.pos_encodings=none \
   arch.H_cycles=3 arch.L_cycles=6 \
-  +run_name=trm_r_mlp-sudoku_extreme ema=True \
-  +arch.loss.fp_residual_weight=0.01 \
-  +arch.loss.fp_iters_weight=0.0 \
+  +run_name=trm_r_simple_mlp-sudoku_extreme ema=True \
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Training suite completed"

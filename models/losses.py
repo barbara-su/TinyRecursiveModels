@@ -83,7 +83,6 @@ class ACTLossHead(nn.Module):
             }
 
         # Losses
-
         lm_loss = (self.loss_fn(outputs["logits"], labels, ignore_index=IGNORE_LABEL_ID, valid_mask=mask) / loss_divisor).sum()
         q_halt_loss = F.binary_cross_entropy_with_logits(outputs["q_halt_logits"], seq_is_correct.to(outputs["q_halt_logits"].dtype), reduction="sum")
         metrics.update({
@@ -96,8 +95,19 @@ class ACTLossHead(nn.Module):
             q_continue_loss = F.binary_cross_entropy_with_logits(outputs["q_continue_logits"], outputs["target_q_continue"], reduction="sum")
 
             metrics["q_continue_loss"] = q_continue_loss.detach()
+        
+        # fixed point penalties
+        fp_residual_loss = torch.zeros((), device=lm_loss.device, dtype=torch.float32)
+        
+        if "fp_residual_probe" in outputs:
+            fp_residual_loss = outputs["fp_residual_probe"].to(torch.float32).sum() # is sum the best option?
+            metrics["fp_residual_probe_sum"] = fp_residual_loss.detach()
+        
         # Filter outputs for return
         detached_outputs = {k: outputs[k].detach() for k in return_keys if k in outputs}
-
-        return new_carry, lm_loss + 0.5 * (q_halt_loss + q_continue_loss), metrics, detached_outputs, new_carry.halted.all()
+        
+        # add fp_residual_loss
+        total_loss = lm_loss + 0.5 * (q_halt_loss + q_continue_loss) + 0.01 * fp_residual_loss
+        
+        return new_carry, total_loss, metrics, detached_outputs, new_carry.halted.all()
 
